@@ -1,0 +1,109 @@
+pipeline{
+    agent{ label "devops1" }
+    options{
+        disableConcurrentBuilds() //禁止同时构建
+        timeout(time:1,unit:"HOURS") //整个pipeline不得超过1h
+        buildDiscarder(logRotator(numToKeepStr:'10')) // 保留最近10次构建记录
+    }
+    parameters {
+        text(name: '__services_image_version', defaultValue: 'None', description: 'images repo and tag')
+        text(name: '__hosts_and_services', defaultValue: 'None', description: 'host ip ，credential ， services ，dumplicates')
+        string(name: "__versions_path", defaultValue: 'None', description: 'versions root path ')
+        //string(name: "__docker_repo_namespace",defaultValue: 'None', description:"aliyun shanghai docker repo namespace")
+    }
+
+    environment{
+        services_image_version = "${params.__services_image_version}"
+        hosts_and_services = "${params.__hosts_and_services}"
+        versions_path = "${params.__versions_path}"
+    }
+    stages{
+        stage("write vars to file"){
+            steps{
+                dir("."){
+                    writeFile encoding: 'utf-8', file: './hosts_and_services.json', text: "${env.hosts_and_services}"
+                    writeFile encoding: 'utf-8', file: './services_image_version.json', text: "${env.services_image_version}"
+                }
+            }
+        }
+        stage("clone and venv"){
+            steps{
+                dir("./lib3"){
+                    git credentialsId: 'mannerjenkins', url: 'https://gitee.com/mannercoffee/lib3.git'
+                }
+                dir("./check_env"){
+                    git credentialsId: 'mannerjenkins', url: 'https://gitee.com/mannercoffee/check_env.git'
+                }
+                dir("./dockerfiles"){
+                    git credentialsId: 'mannerjenkins', url: 'https://gitee.com/mannercoffee/dockerfiles.git'
+                }
+                dir("./settings_files"){
+                    git credentialsId: 'mannerjenkins', url: 'https://gitee.com/mannercoffee/settings_files.git'
+                }
+                dir("."){
+                    echo "check pip3 and python3"
+                    sh "python3 -V && pip3 -V"
+                    echo "create python virtual env"
+                    sh 'python3 -m venv venv3'
+                    sh 'source ./venv3/bin/activate && pip install --upgrade pip setuptools wheel'
+                    sh 'source ./venv3/bin/activate && pip install -r ./lib3/requirements.txt -i https://mirrors.aliyun.com/pypi/simple/'
+                }
+            }
+        }
+        stage("check_env"){
+            steps{
+                sh 'printenv'
+            }
+        }
+        stage("check_path"){
+            steps{
+                dir("."){
+                    script{
+                        def workspace_abs_path = pwd() // 定义一个变量，获取当前pipeline的工作目录workspace的绝对路径
+                        sh "source ./venv3/bin/activate && python ./check_env/check_path.py applet -r ${versions_path} -s ${workspace_abs_path}/services_image_version.json"
+                    }
+                }
+
+            }
+        }
+        stage("change jar settings"){
+            steps{
+                dir("."){
+                    script{
+                        def workspace_abs_path = pwd()
+                        sh "source ./venv3/bin/activate && python ./lib3/main/change_jar_by_json.py applet -r ${versions_path} -p ./services_image_version.json -s ${workspace_abs_path}/settings_files/"
+                    }
+                }
+            }
+        }
+        stage("build images"){
+            steps{
+                dir("."){
+                    script{
+                        def workspace_abs_path = pwd()
+                        sh "source ./venv3/bin/activate && python ./lib3/main/build_image_by_json.py applet -r ${versions_path} -p ./services_image_version.json -d ${workspace_abs_path}/dockerfiles/"
+                    }
+                }
+            }
+        }
+        stage("push images"){
+            steps{
+                dir("."){
+                    withCredentials([usernamePassword(credentialsId: "repo-applet-prod", usernameVariable: "username", passwordVariable: "password")]){
+                        script{
+                            echo "${username}:${password}"
+                            def workspace_abs_path = pwd()
+                            sh "source ./venv3/bin/activate && python ./lib3/main/push_images_by_json.py applet -u ${username} -p ${password} -s ./services_image_version.json"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post{
+        success{
+            echo "构建成功，清空Jenkins工作空间Workspace。"
+            cleanWs()
+        }
+    }
+}
